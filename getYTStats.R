@@ -1,0 +1,161 @@
+options(tidyverse.quiet = TRUE)
+library(httr)
+library(jsonlite)
+library(lubridate)
+library(tidyverse)
+
+DEFAULT_BUFFER = 3
+MIN_CODERS = 1
+START_DATE = "4/8/2025"
+CODES_FILE = "Video Codes - Ingest.csv"
+AGGREG_FILE = "Long-form Content Analysis - Aggregate.csv"
+YOUTUBE_API = Sys.getenv("YOUTUBE_API")
+PURGE_VIDS = c("O_gRPhCtJws", # per Rosie
+               "1usZrJo2-UI", "eCeMivdcMAQ", "selSonjBqR4", "twCIayzFNC8" # 4/8 vids not in aggr.
+               )
+
+most_recent_codes <- data.table::fread(CODES_FILE) %>% 
+  filter(Type != "point" & 
+           Timestamp > START_DATE & 
+           !(`Video ID` %in% PURGE_VIDS) & 
+           Duration >= 0) %>% 
+  select(!c(Type, Timestamp, Notes)) %>% 
+  mutate(End = Timecode + Duration, Coder = glue::trim((Coder)))
+
+merge_overlapping_intervals <- function(group_df, buffer = DEFAULT_BUFFER) {
+  # Sort by start time
+  group_df <- group_df %>% arrange(Timecode)
+  
+  # Initialize result container
+  merged <- list()
+  current <- group_df[1, ]
+  current$Coders <- list(unique(current$Coder))  # track coders
+  if (nrow(group_df) != 1) {
+  
+    for (i in 2:nrow(group_df)) {
+      row <- group_df[i, ]
+      
+      # Check for overlap or within buffer
+      if (is.na(row$Timecode) || is.na(current$End + buffer)) {
+        print(row$Timecode)
+        print(current$End)
+      }
+      if (row$Timecode <= (current$End + buffer)) {
+        # Merge
+        current$End <- mean(current$End, row$End)
+        current$Timecode <- mean(current$Timecode, row$Timecode)
+        current$Coders[[1]] <- unique(c(current$Coders[[1]], row$Coder))
+      } else {
+        # Push current and reset
+        merged[[length(merged) + 1]] <- current
+        current <- row
+        current$Coders <- list(unique(current$Coder))
+      }
+    }
+    merged[[length(merged) + 1]] <- current
+    result <- bind_rows(merged)
+  } else {
+    result <- group_df %>% 
+      mutate(Coders = list(unique(Coder))) %>%
+      select(-Coder)
+  }
+  
+  # Add final fields
+  result %>%
+    mutate(Duration = End - Timecode,
+           Num_Coders = lengths(Coders)) #%>%
+    #select(`Video ID`, Code, Timecode, End, Duration, Num_Coders, Coders)
+}
+
+# Apply per video and code
+consensus_df <- most_recent_codes %>%
+  group_by(`Video ID`, Code) %>%
+  group_modify(~merge_overlapping_intervals(.x)) %>%
+  ungroup() %>% select(!Coder) %>% filter(Num_Coders >= MIN_CODERS)
+
+
+infoByID <- function(video_id, api_key = YOUTUBE_API) {
+  # Construct API request URL
+  url <- paste0("https://www.googleapis.com/youtube/v3/videos?",
+                "part=snippet,statistics,contentDetails&id=", video_id,
+                "&key=", api_key)
+  
+  # Send GET request
+  response <- GET(url)
+  
+  # Check if the response is valid
+  if (status_code(response) != 200) {
+    stop("Failed to fetch data. Check your API key and video ID.")
+  }
+  
+  # Parse JSON response
+  data <- fromJSON(content(response, as = "text"))
+  
+  # Extract relevant information
+  if (length(data$items) == 0) {
+    stop("No video found with the provided ID.")
+  }
+  
+  video_info <- data$items
+  
+  duration_iso <- video_info$contentDetails$duration
+  duration_seconds <- as.numeric(period_to_seconds(as.period(duration_iso)))
+  
+  published_date <- as.Date(video_info$snippet$publishedAt)
+  
+  # Extract required details
+  result <- list(
+    title = video_info$snippet$title,
+    channel = video_info$snippet$channelTitle,
+    post_date = published_date,
+    duration = duration_seconds,
+    description = video_info$snippet$description,
+    view_count = as.numeric(video_info$statistics$viewCount),
+    like_count = ifelse(is.null(video_info$statistics$likeCount), NA, as.numeric(video_info$statistics$likeCount)),
+    comment_count = ifelse(is.null(video_info$statistics$commentCount), NA, as.numeric(video_info$statistics$commentCount))
+  )
+  
+  return(result)
+}
+
+aggregate_file <- data.table::fread(AGGREG_FILE) %>%
+  filter(!is.na(Link) & Link != "#REF!" & !`Delete?` & !`Traditional News Broadcast?`) %>% 
+  mutate(`Video ID` = sub(".*(?:v=|youtu\\.be/|embed/)([a-zA-Z0-9_-]+).*", "\\1", `Link`)) %>%
+  select(Subject, Endorsement, `Video ID`) %>% 
+  group_by(`Video ID`) %>% slice(1) %>% ungroup()
+
+video_dictionary <- consensus_df %>% group_by(`Video ID`) %>% 
+  summarise(AdTime = sum(Duration[Code == "ad"], na.rm = TRUE)) %>% 
+  left_join(aggregate_file, by = "Video ID") %>%
+  mutate(info = purrr::map(`Video ID`, ~ infoByID(.x))) %>% unnest_wider(info) %>% 
+  mutate(activeDuration = duration - AdTime)
+
+needInfo <- video_dictionary %>% filter(is.na(Subject))
+
+codes <- c("code_campaign", "code_climate", "code_electionsdemocracy", 
+           "code_race", "code_abortion", "code_familypersonal", "code_gender", 
+           "code_immigration", "code_international", "code_lgbtq", 
+           "code_patriotism", "code_religion", "code_sportsculture", 
+           "code_healthcare")
+
+pivot <- consensus_df %>% group_by(`Video ID`, Code) %>% 
+  summarise(TotalDuration = sum(Duration, na.rm = TRUE)) %>% ungroup() %>% 
+  pivot_wider(names_from = Code, values_from = TotalDuration, names_prefix = "code_") %>% 
+  left_join(video_dictionary, by = "Video ID") %>% 
+  mutate(engagementIndex = (like_count * 1 + comment_count * 3) / view_count * 100) %>% 
+  mutate(relativeEngagement = engagementIndex / mean(engagementIndex) * 100) %>% 
+  mutate(across(starts_with("code_"), ~ replace(., is.na(.), 0)))
+
+pivot_prop <- pivot %>% mutate(across(starts_with("code_"), ~ . / activeDuration))
+pivot_sum <- pivot %>% group_by(Endorsement) %>% 
+  summarise(across(starts_with("code_"), ~ sum(.x, na.rm = TRUE)), 
+            view_count = sum(view_count),
+            like_count = sum(like_count),
+            comment_count = sum(comment_count),
+            activeDuration = sum(activeDuration)) %>% 
+  mutate(across(starts_with("code_"), ~ . / activeDuration)) %>% 
+  mutate(engagementIndex = (like_count * 1 + comment_count * 3) / view_count * 100)
+
+# write.csv(needInfo, "C:/Users/techn/Downloads/Need Info.csv", row.names = FALSE, na = "")
+
+
