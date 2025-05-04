@@ -132,6 +132,12 @@ video_dictionary <- consensus_df %>% group_by(`Video ID`) %>%
 
 needInfo <- video_dictionary %>% filter(is.na(Subject))
 
+if (needInfo %>% nrow() > 0) {
+  warning(paste0("Missing partisanship info for:\n", 
+                 paste0(needInfo$`Video ID`, collapse=", "), 
+                 "\nRun View(needInfo) for more details."))
+}
+
 codes <- c("code_campaign", "code_climate", "code_electionsdemocracy", 
            "code_race", "code_abortion", "code_familypersonal", "code_gender", 
            "code_immigration", "code_international", "code_lgbtq", 
@@ -149,13 +155,247 @@ pivot <- consensus_df %>% group_by(`Video ID`, Code) %>%
 pivot_prop <- pivot %>% mutate(across(starts_with("code_"), ~ . / activeDuration))
 pivot_sum <- pivot %>% group_by(Endorsement) %>% 
   summarise(across(starts_with("code_"), ~ sum(.x, na.rm = TRUE)), 
-            view_count = sum(view_count),
-            like_count = sum(like_count),
-            comment_count = sum(comment_count),
-            activeDuration = sum(activeDuration)) %>% 
-  mutate(across(starts_with("code_"), ~ . / activeDuration)) %>% 
-  mutate(engagementIndex = (like_count * 1 + comment_count * 3) / view_count * 100)
+            total_view_count = sum(view_count, na.rm = TRUE),
+            total_like_count = sum(like_count, na.rm = TRUE),
+            total_comment_count = sum(comment_count, na.rm = TRUE),
+            total_activeDuration = sum(activeDuration, na.rm = TRUE),
+            ave_view_count = mean(view_count, na.rm = TRUE),
+            ave_like_count = mean(like_count, na.rm = TRUE),
+            ave_comment_count = mean(comment_count, na.rm = TRUE),
+            ave_activeDuration = mean(activeDuration, na.rm = TRUE)
+            ) %>% 
+  # mutate(across(starts_with("code_"), ~ . / activeDuration)) %>% 
+  mutate(engagementIndex = (total_like_count * 1 + total_comment_count * 3) / total_view_count * 100)
 
-# write.csv(needInfo, "C:/Users/techn/Downloads/Need Info.csv", row.names = FALSE, na = "")
+
+group_T <- pivot[pivot$Endorsement == "T", ]
+group_H <- pivot[pivot$Endorsement == "H", ]
+pivot$Endorsement = recode(pivot$Endorsement,
+                           "H" = "Harris",
+                           "T" = "Trump")
+run_one_sided_t_test <- function(var) {
+  t.test(group_T[[var]], group_H[[var]], alternative = "greater", var.equal = FALSE)
+}
+
+test_engagementIndex <- run_one_sided_t_test("engagementIndex")
+test_activeDuration <- run_one_sided_t_test("activeDuration")
+test_code_familypersonal <- run_one_sided_t_test("code_familypersonal")
+
+
+library(ggplot2)
+library(showtext)
+library(patchwork)
+font_add_google("IBM Plex Sans", "ibm")
+showtext_auto()
+theme_cunty <- function(base_size = 12, base_family = "ibm") {
+  theme_minimal(base_size = base_size, base_family = base_family) +
+    theme(
+      panel.grid.major.y = element_line(color = "#cccccc", size = 0.3),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "black", size = 0.3),
+      axis.ticks = element_line(color = "black", size = 0.3),
+      plot.title = element_text(face = "bold", size = 16, hjust = 0),
+      plot.subtitle = element_text(size = 13, color = "gray30", margin = margin(b = 10)),
+      plot.caption = element_text(size = 10, color = "gray40", hjust = 0),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      strip.text = element_text(face = "bold", size = 12)
+    )
+}
+
+ggplot(pivot, aes(x = Endorsement, y = engagementIndex, fill = Endorsement)) +
+  geom_violin(alpha = 0.4, trim = FALSE, linetype = 0) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, notch = FALSE) +
+  geom_jitter(aes(color = Endorsement), width = 0.15, alpha = 0.3) +
+  scale_color_manual(values = c("Trump" = "#E45756", "Harris" = "#4C78A8")) +  
+  scale_fill_manual(values = c("Trump" = "#E45756", "Harris" = "#4C78A8")) +
+  labs(title = "Engagement Index by Endorsement Type",
+       y = "Engagement Index", x = "Endorsement") +
+  theme_cunty() + 
+  
+  ggplot(pivot, 
+         aes(x = Endorsement, y = activeDuration, fill = Endorsement)) +
+  geom_violin(alpha = 0.4, trim = FALSE, linetype = 0) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, notch = FALSE) +
+  geom_jitter(aes(color = Endorsement), width = 0.15, alpha = 0.3) +
+  scale_color_manual(values = c("Trump" = "#E45756", "Harris" = "#4C78A8")) +  
+  scale_fill_manual(values = c("Trump" = "#E45756", "Harris" = "#4C78A8")) +
+  labs(title = "Active Duration by Endorsement Type",
+       y = "Active Duration", x = "Endorsement") +
+  theme_cunty()
+
+
+format_time <- function(x) {
+  sprintf("%02d:%02d", x %/% 60, x %% 60)
+}
+all_codes <- c("healthcare", "climate", "ad", "sportsculture", 
+               "patriotism", "immigration", "familypersonal", 
+               "electionsdemocracy", "econtax", "campaign")
+code_labels <- c("Healthcare", "Climate", "Ad Read/Irrelevant", "Sports/Pop Culture",
+                 "Patriotism", "Immigration", "Family/Personal",
+                 "Election Integrity/Democracy", "Economy/Taxes", "Campaign/Finance")
+sand <- ggplot(consensus_df %>% 
+                 filter(`Video ID` == "TwED_Znc9XQ") %>% 
+                 mutate(Code = factor(Code, levels = all_codes, labels = code_labels)), 
+               aes(x = Timecode, xend = End, y = Code, yend = Code, color = Code)) +
+  geom_segment(size = 6, alpha = 0.7) +
+  scale_x_continuous(labels = format_time) +
+  labs(#title = paste("Code Timeline for Sen. Bernie Sanders"),
+       subtitle = "Sen. Bernie Sanders | This Past Weekend w/ Theo Von #524", 
+       x = "Time (mm:ss)",
+       y = "Code") +
+  scale_y_discrete(drop = FALSE) +
+  theme_cunty() +
+  theme(legend.position = "none")
+vanc <- ggplot(consensus_df %>% 
+                 filter(`Video ID` == "vd8mmTDDqAs") %>% 
+                 mutate(Code = factor(Code, levels = all_codes, labels = code_labels)), 
+               aes(x = Timecode, xend = End, y = Code, yend = Code, color = Code)) +
+  geom_segment(size = 6, alpha = 0.7) +
+  scale_x_continuous(labels = format_time) +
+  labs(#title = paste("Code Timeline for VP Vance"),
+       subtitle = "Sen. JD Vance | This Past Weekend w/ Theo Von #540",
+       x = "Time (mm:ss)",
+       y = "Code") +
+  scale_y_discrete(drop = FALSE) +
+  theme_cunty() +
+  theme(legend.position = "none")
+
+(sand | vanc) + plot_annotation(
+    title = 'Code Timelines for Sen. Sanders & VP Vance',
+    caption = 'NMPI GISP'
+  )
+
+{ggplot(consensus_df %>% filter(`Video ID` == "8JDMKyTpXWc"), 
+       aes(xmin = Timecode, xmax = End, ymin = 0, ymax = 1, fill = Code)) +
+  geom_rect(alpha = 0.4, color = NA) +
+  scale_x_continuous(labels = format_time) +
+  labs(title = paste("Code Timeline (Collapsed) – Video 8JDMKyTpXWc"),
+       x = "Time (mm:ss)", y = NULL) +
+  theme_cunty() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.position = "right")} %>% 
+  plotly::ggplotly() %>% 
+  plotly::config(displaylogo = FALSE) %>% 
+  plotly::layout(font = list(family = "sans serif"))
+
+ggplot(pivot %>%  group_by(post_date, Endorsement) %>% 
+         summarise(video_count = n(), .groups = "drop") %>% 
+         arrange(Endorsement, post_date) %>%
+         group_by(Endorsement) %>%
+         mutate(cumulative_videos = cumsum(video_count)) %>%
+         ungroup(), 
+       aes(x = post_date, y = cumulative_videos, color = Endorsement)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2, alpha = 0.8) +
+  scale_color_manual(values = c("Trump" = "#E45756", "Harris" = "#4C78A8")) +
+  labs(title = "Cumulative Number of Videos Over Time by Endorsement",
+       subtitle = "Videos sampled from x/x/x to x/x/x",
+       x = "Post Date", y = "Number of Videos", caption = "NMPI GISP, 2025") +
+  theme_cunty()
+
+library(huxtable)
+summary_table <- pivot %>%
+  group_by(Endorsement) %>%
+  summarise(
+    n_videos = n(),
+    avg_engagement = mean(engagementIndex, na.rm = TRUE),
+    avg_duration = mean(duration, na.rm = TRUE),
+    avg_activeDuration = mean(activeDuration, na.rm = TRUE),
+    avg_view_count = mean(view_count, na.rm = TRUE),
+    avg_like_count = mean(like_count, na.rm = TRUE),
+    avg_comment_count = mean(comment_count, na.rm = TRUE)
+  ) %>%
+  as_hux() %>%
+  set_caption("Summary Statistics by Endorsement") %>%
+  set_bold(1, everywhere, TRUE) %>%
+  set_align(everywhere, everywhere, "center")
+
+code_sums <- pivot %>%
+  group_by(Endorsement) %>%
+  summarise(across(all_of(codes), ~ sum(.x, na.rm = TRUE))) %>%
+  as_hux() %>%
+  set_caption("Sum of Topical Code Counts by Endorsement") %>%
+  set_bold(1, everywhere, TRUE) %>%
+  set_number_format(2, everywhere, 0) %>%
+  set_align(everywhere, everywhere, "center")
+
+df_monthly <- pivot %>%
+  mutate(month = format(post_date, "%Y-%m")) %>%
+  count(month, Endorsement) %>%
+  tidyr::pivot_wider(names_from = Endorsement, values_from = n, values_fill = 0) %>%
+  arrange(month) %>%
+  as_hux() %>%
+  set_caption("Number of Videos per Month by Endorsement") %>%
+  set_bold(1, everywhere, TRUE) %>%
+  set_align(everywhere, everywhere, "center")
+
+engagement_outliers <- pivot %>%
+  arrange(desc(relativeEngagement)) %>%
+  select(`Video ID`, Endorsement, post_date, title, relativeEngagement, engagementIndex) %>%
+  slice_head(n = 5) %>%
+  as_hux() %>%
+  set_caption("Top 5 Videos by Relative Engagement") %>%
+  set_bold(1, everywhere, TRUE) %>%
+  set_wrap(TRUE) %>%
+  set_align(everywhere, everywhere, "center")
+
+library(broom)
+# Run t-tests
+ttests <- list(
+  engagementIndex = t.test(engagementIndex ~ Endorsement, data = pivot),
+  activeDuration = t.test(activeDuration ~ Endorsement, data = pivot),
+  code_familypersonal = t.test(code_familypersonal ~ Endorsement, data = pivot)
+)
+
+# Tidy results
+ttest_df <- bind_rows(lapply(ttests, tidy), .id = "Variable") %>%
+  select(Variable, estimate1, estimate2, statistic, p.value) %>%
+  rename(
+    Mean_T = estimate1,
+    Mean_H = estimate2,
+    T_statistic = statistic,
+    P_value = p.value
+  ) %>%
+  as_hux() %>%
+  set_caption("T-Test Results Comparing T vs H Endorsements") %>%
+  set_bold(1, everywhere, TRUE) %>%
+  set_number_format(2, everywhere, 3) %>%
+  set_align(everywhere, everywhere, "center")
+
+num_vars <- pivot %>%
+  select(engagementIndex, activeDuration, duration, view_count, like_count, comment_count, starts_with("code_"))
+
+# Compute correlation matrix
+cor_matrix <- cor(num_vars, use = "pairwise.complete.obs")
+
+# Convert to huxtable
+
+
+# Convert counts to binary (presence/absence)
+binary_codes <- pivot %>%
+  mutate(across(starts_with("code_"), ~ as.integer(. > 0))) %>%
+  select(Endorsement, starts_with("code_"))
+
+# Run chi-square tests for each code
+chi_results <- lapply(names(binary_codes)[-1], function(code) {
+  tbl <- table(binary_codes[[code]], binary_codes$Endorsement)
+  test <- chisq.test(tbl)
+  tibble(Code = code, ChiSq = test$statistic, df = test$parameter, P_value = test$p.value)
+})
+
+# Combine and format
+chi_df <- bind_rows(chi_results) %>%
+  arrange(P_value) %>%
+  as_hux() %>%
+  set_caption("Chi-Square Tests of Code Presence by Endorsement") %>%
+  set_bold(1, everywhere, TRUE) %>%
+  set_number_format(2, everywhere, 3) %>%
+  set_align(everywhere, everywhere, "center")
+
+# write.csv(needInfo, "Need Info.csv", row.names = FALSE, na = "")
 
 

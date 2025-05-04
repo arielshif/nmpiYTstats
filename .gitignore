@@ -1,3 +1,4 @@
 .Renviron
 *.ini
 .Rproj.user
+.Rhistory
